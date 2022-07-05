@@ -42,7 +42,7 @@ class FlameBase(Sim1D):
         * ``velocity``: normal velocity [m/s]
         * ``spread_rate``: tangential velocity gradient [1/s]
         * ``lambda``: radial pressure gradient [N/m^4]
-        * ``eField``: electric field strength
+        * ``ePotential``: electric potential [V]
 
         :param domain:
             Index of a specific domain within the `Sim1D.domains`
@@ -54,7 +54,7 @@ class FlameBase(Sim1D):
         dom = self.domains[self.domain_index(domain)]
         if isinstance(dom, Inlet1D):
             return tuple([e for e in self._other
-                          if e not in {'grid', 'lambda', 'eField'}])
+                          if e not in {'grid', 'lambda', 'ePotential'}])
         elif isinstance(dom, (IdealGasFlow, IonFlow)):
             return self._other
         else:
@@ -111,12 +111,12 @@ class FlameBase(Sim1D):
             DataFrame input requires a working installation of *pandas*, whereas
             HDF input requires an installation of *h5py*. These packages can be
             installed using pip or conda (``pandas`` and ``h5py``, respectively).
-        :param group:
+        :param key:
             Group identifier within a HDF container file (only used in
             combination with HDF restart data).
         """
         super().set_initial_guess(*args, data=data, group=group, **kwargs)
-        if data is None:
+        if not data:
             return
 
         # load restart data into SolutionArray
@@ -128,15 +128,19 @@ class FlameBase(Sim1D):
             if data.endswith('.hdf5') or data.endswith('.h5'):
                 # data source identifies a HDF file
                 arr = SolutionArray(self.gas, extra=self.other_components())
-                arr.read_hdf(data, group=group, subgroup=self.domains[1].name)
+                arr.read_hdf(data, group=group)
+
             elif data.endswith('.csv'):
                 # data source identifies a CSV file
                 arr = SolutionArray(self.gas, extra=self.other_components())
                 arr.read_csv(data)
+
             else:
-                raise ValueError(f"'{data}' does not identify CSV or HDF file.")
+                raise ValueError(
+                    "'{}' does not identify CSV or HDF file.".format(data)
+                )
         else:
-            # data source is presumably a pandas DataFrame
+            # data source is a pandas DataFrame
             arr = SolutionArray(self.gas, extra=self.other_components())
             arr.from_pandas(data)
 
@@ -711,7 +715,8 @@ for _attr in ['density', 'density_mass', 'density_mole', 'volume_mass',
               'entropy_mass', 'g', 'gibbs_mole', 'gibbs_mass', 'cv',
               'cv_mole', 'cv_mass', 'cp', 'cp_mole', 'cp_mass',
               'isothermal_compressibility', 'thermal_expansion_coeff',
-              'viscosity', 'thermal_conductivity', 'heat_release_rate']:
+              'viscosity', 'thermal_conductivity', 'heat_release_rate',
+              'mean_molecular_weight']:
     setattr(FlameBase, _attr, _array_property(_attr))
 FlameBase.volume = _array_property('v') # avoid confusion with velocity gradient 'V'
 FlameBase.int_energy = _array_property('u') # avoid collision with velocity 'u'
@@ -724,7 +729,8 @@ for _attr in ['X', 'Y', 'concentrations', 'partial_molar_enthalpies',
               'standard_entropies_R', 'standard_int_energies_RT',
               'standard_gibbs_RT', 'standard_cp_R', 'creation_rates',
               'destruction_rates', 'net_production_rates', 'mix_diff_coeffs',
-              'mix_diff_coeffs_mass', 'mix_diff_coeffs_mole', 'thermal_diff_coeffs']:
+              'mix_diff_coeffs_mass', 'mix_diff_coeffs_mole', 'thermal_diff_coeffs',
+              'mobilities']:
     setattr(FlameBase, _attr, _array_property(_attr, 'n_species'))
 
 # Remove misleading examples and references to setters that don't exist
@@ -797,11 +803,11 @@ class FreeFlame(FlameBase):
             location. Locations are given as a fraction of the entire domain
         """
         super().set_initial_guess(data=data, group=group)
-        if data is not None:
+        if data:
             # set fixed temperature
             Tmid = .75 * self.T[0] + .25 * self.T[-1]
-            i = np.flatnonzero(self.T < Tmid)[-1]
-            self.fixed_temperature = self.T[i]
+            i = np.flatnonzero(data.T < Tmid)[-1]
+            self.fixed_temperature = data.T[i]
 
             return
 
@@ -936,22 +942,104 @@ class FreeFlame(FlameBase):
 class IonFlameBase(FlameBase):
 
     @property
-    def electric_field_enabled(self):
-        """ Get/Set whether or not to solve the Poisson's equation."""
-        return self.flame.electric_field_enabled
+    def poisson_enabled(self):
+        """ get/set whether or not to solve the poisson's equation."""
+        return self.flame.poisson_enabled
 
-    @electric_field_enabled.setter
-    def electric_field_enabled(self, enable):
-        self.flame.electric_field_enabled = enable
+    @poisson_enabled.setter
+    def poisson_enabled(self, enable):
+        self.flame.poisson_enabled = enable
 
     @property
-    def E(self):
+    def electric_potential(self):
         """
-        Array containing the electric field strength at each point.
+        Array containing the electric potential [V] at each point.
         """
-        return self.profile(self.flame, 'eField')
+        return self.profile(self.flame, 'ePotential')
 
-    def solve(self, loglevel=1, refine_grid=True, auto=False, stage=1, enable_energy=True):
+    @property
+    def electric_field(self):
+        """
+        Array containing the electric field strength [V/m] at each point.
+        """
+        z = self.grid
+        phi = self.electric_potential
+        n_points = self.flame.n_points
+        Efield = np.zeros(n_points)
+        Efield[0] = (phi[0] - phi[1]) / (z[1] - z[0])
+        # calculate E field strength
+        for n in range(1,n_points-1):
+            Efield[n] = (phi[n-1] - phi[n+1]) / (z[n+1] - z[n-1])
+        Efield[n_points-1] = ((phi[n_points-2] - phi[n_points-1]) /
+                                (z[n_points-1] -   z[n_points-2]))
+        return Efield
+
+    @property
+    def electric_charge_density(self):
+        """
+        Array containing the electric charge density [C/m^3] at each point.
+        """
+        rho_e = np.zeros(self.flame.n_points)
+        Wi = self.gas.molecular_weights
+        Si = self.gas.charges
+        for n in range(self.gas.n_species):
+            rho_e += Si[n] * self.Y[n,:] / Wi[n]
+        rho_e *= (avogadro * electron_charge * self.density)
+        return rho_e
+
+    @property
+    def total_ion_production(self):
+        """
+        Array containing the total ion producion density [A/m^3] produced by the flame.
+        """
+        w_e = np.zeros(self.flame.n_points)
+        Si = self.gas.charges
+        for n in range(self.gas.n_species):
+            if (Si[n] > 0):
+                w_e += (Si[n] * self.net_production_rates[n,:])
+        w_e *= (avogadro * electron_charge)
+        return w_e
+
+    @property
+    def ion_current_density(self):
+        """
+        The total ion current density [A/m^2] produced by the flame.
+        """
+        n_points = self.flame.n_points
+        J = np.zeros(n_points)
+
+        z  = self.grid
+        u  = self.velocity
+        Ki = self.mobilities
+        Si = self.gas.charges
+        E  = self.electric_field
+        Di = self.mix_diff_coeffs
+        Wm = self.mean_molecular_weight
+        Wi = self.gas.molecular_weights
+
+        def getXgrad(n):
+           d = np.zeros(n_points)
+           z = self.grid
+           # First grid point
+           d[0] = (self.X[n,0] - self.X[n,0])/(z[1] - z[0])
+           # Internal points
+           for i in range(1, n_points-1):
+              d[i] = (self.X[n,i] - self.X[n,i-1])/(z[i] - z[i-1])
+           # Last grid point
+           d[n_points-1] = (self.X[n,n_points-1] - self.X[n,n_points-2])/(z[n_points-1] - z[n_points-2])
+           return d
+
+        for n in range(self.gas.n_species):
+            if (Si[n] != 0):
+                YiVi = (               u[:]*self.Y[n,:]
+                       + Si[n]*Ki[n,:]*E[:]*self.Y[n,:]
+                       - Di[n,:]*getXgrad(n)*Wi[n]/Wm[:])
+                J += Si[n] / Wi[n] * YiVi
+        J *= (avogadro * electron_charge * self.density)
+
+        return J
+
+    def solve(self, loglevel=1, refine_grid=True, auto=False, stage=2, enable_energy=True):
         self.flame.set_solving_stage(stage)
         if stage == 1:
             super().solve(loglevel, refine_grid, auto)
@@ -963,7 +1051,7 @@ class IonFlameBase(FlameBase):
 class IonFreeFlame(IonFlameBase, FreeFlame):
     """A freely-propagating flame with ionized gas."""
     __slots__ = ('inlet', 'flame', 'outlet')
-    _other = ('grid', 'velocity', 'eField')
+    _other = ('grid', 'velocity', 'ePotential')
 
     def __init__(self, gas, grid=None, width=None):
         if not hasattr(self, 'flame'):
@@ -1114,7 +1202,7 @@ class BurnerFlame(FlameBase):
 class IonBurnerFlame(IonFlameBase, BurnerFlame):
     """A burner-stabilized flat flame with ionized gas."""
     __slots__ = ('burner', 'flame', 'outlet')
-    _other = ('grid', 'velocity', 'eField')
+    _other = ('grid', 'velocity', 'ePotential')
 
     def __init__(self, gas, grid=None, width=None):
         if not hasattr(self, 'flame'):
@@ -1124,6 +1212,19 @@ class IonBurnerFlame(IonFlameBase, BurnerFlame):
             self.flame.set_axisymmetric_flow()
 
         super().__init__(gas, grid, width)
+
+    @property
+    def delta_electric_potential(self):
+        """ get/set difference of potential across the domain."""
+        return (self.outlet.electricPotential - self.burner.electricPotential)
+
+    @delta_electric_potential.setter
+    def delta_electric_potential(self, phi):
+        self.burner.electricPotential = 0.0
+        self.outlet.electricPotential = phi
+        self.burner.isCathode = (phi >= 0)
+        self.outlet.isAnode   = (phi >= 0)
+        self.set_profile('ePotential', [0, 1], [0, phi])
 
 
 class CounterflowDiffusionFlame(FlameBase):

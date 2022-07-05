@@ -330,6 +330,35 @@ cdef class Boundary1D(Domain1D):
             self.gas.TPY = self.gas.T, self.gas.P, Y
             self.X = self.gas.X
 
+    property electricPotential:
+        """
+        Electric potential at this boundary
+        """
+        def __get__(self):
+            return self.boundary.electricPotential()
+
+        def __set__(self, phi):
+            self.boundary.setElectricPotential(phi)
+
+    property isAnode:
+        """
+        Flag that determines if this boundary is an anode for the system
+        """
+        def __get__(self):
+            return self.boundary.isAnode()
+
+        def __set__(self, isAnode):
+            self.boundary.setIsAnode(isAnode)
+
+    property isCathode:
+        """
+        Flag that determines if this boundary is a cathode for the system
+        """
+        def __get__(self):
+            return self.boundary.isCathode()
+
+        def __set__(self, isCathode):
+            self.boundary.setIsCathode(isCathode)
 
 cdef class Inlet1D(Boundary1D):
     """
@@ -685,29 +714,39 @@ cdef class IonFlow(_FlowBase):
         """
         (<CxxIonFlow*>self.flow).setSolvingStage(stage)
 
-    property electric_field_enabled:
+    property poisson_enabled:
         """ Determines whether or not to solve the energy equation."""
         def __get__(self):
-            return (<CxxIonFlow*>self.flow).doElectricField(0)
+            return (<CxxIonFlow*>self.flow).doPoisson(0)
         def __set__(self, enable):
             if enable:
-                (<CxxIonFlow*>self.flow).solveElectricField()
+                (<CxxIonFlow*>self.flow).solvePoissonEqn()
             else:
-                (<CxxIonFlow*>self.flow).fixElectricField()
+                (<CxxIonFlow*>self.flow).fixElectricPotential()
 
     def set_default_tolerances(self):
         """ Set all tolerances to their default values """
         super().set_default_tolerances()
         chargetol = {}
         for S in self.gas.species():
-            if S.composition == {'E': 1.0}:
-                chargetol[S.name] = (1e-5, 1e-20)
-            elif S.charge != 0:
-                chargetol[S.name] = (1e-5, 1e-16)
-        self.set_steady_tolerances(**chargetol)
+            if S.charge != 0:
+                chargetol[S.name] = (1e-5, 1e-12)
+        for S in self.gas.species():
+            if S.name == "E":
+                chargetol[S.name] = (1e-5, 1e-12)
+        chargetol["ePotential"] = (1e-4, 1e-11)
         self.set_transient_tolerances(**chargetol)
         self.have_user_tolerances = False
 
+        for S in self.gas.species():
+            if S.charge != 0:
+                chargetol[S.name] = (1e-5, 1e-12)
+        for S in self.gas.species():
+            if S.name == "E":
+                chargetol[S.name] = (1e-5, 1e-22)
+        chargetol["ePotential"] = (1e-4, 1e-11)
+        self.set_steady_tolerances(**chargetol)
+        self.have_user_tolerances = False
 
 cdef class Sim1D:
     """
@@ -1422,7 +1461,10 @@ cdef class Sim1D:
     def save(self, filename='soln.yaml', name='solution', description='none',
              loglevel=1):
         """
-        Save the solution in YAML format.
+        Save the solution in YAML or XML format.
+
+        .. deprecated:: 2.6
+           XML-based output is deprecated and will be removed in Cantera 3.0.
 
         :param filename:
             solution file
@@ -1440,6 +1482,9 @@ cdef class Sim1D:
 
     def restore(self, filename='soln.yaml', name='solution', loglevel=2):
         """Set the solution vector to a previously-saved solution.
+
+        .. deprecated:: 2.6
+           XML-based input is deprecated and will be removed in Cantera 3.0.
 
         :param filename:
             solution file
