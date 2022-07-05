@@ -6,7 +6,8 @@
 #include "cantera/oneD/IonFlow.h"
 #include "cantera/oneD/StFlow.h"
 #include "cantera/oneD/refine.h"
-#include "cantera/transport/Transport.h"
+#include "cantera/base/ctml.h"
+#include "cantera/transport/TransportBase.h"
 #include "cantera/numerics/funcs.h"
 #include "cantera/numerics/polyfit.h"
 #include "cantera/base/utilities.h"
@@ -42,31 +43,35 @@ IonFlow::IonFlow(IdealGasPhase* ph, size_t nsp, size_t points) :
     }
 
     // no bound for electric potential
-    setBounds(c_offset_E, -1.0e20, 1.0e20);
+    setBounds(c_offset_P, -1.0e20, 1.0e20);
 
     // Set tighter negative species limit on charged species to avoid
     // instabilities. Tolerance on electrons is even tighter to account for the
     // low "molecular" weight.
     for (size_t k : m_kCharge) {
-        setBounds(c_offset_Y + k, -1e-14, 1.0);
+         setBounds(c_offset_Y + k, -1e-8, 1.0);
+    }
+    if (m_kElectron != npos) {
+        setBounds(c_offset_Y + m_kElectron, -1e-10, 1.0);
     }
     setBounds(c_offset_Y + m_kElectron, -1e-18, 1.0);
 
-    m_refiner->setActive(c_offset_E, false);
+    m_refiner->setActive(c_offset_P, true);
     m_mobility.resize(m_nsp*m_points);
-    m_do_electric_field.resize(m_points,false);
+    m_do_poisson.resize(m_points,false);
 }
 
 void IonFlow::resize(size_t components, size_t points){
     StFlow::resize(components, points);
     m_mobility.resize(m_nsp*m_points);
     m_do_species.resize(m_nsp,true);
-    m_do_electric_field.resize(m_points,false);
+    m_do_poisson.resize(m_points,false);
+    m_fixedElecPoten.resize(m_points,0.0);
 }
 
 bool IonFlow::componentActive(size_t n) const
 {
-    if (n == c_offset_E) {
+    if (n == c_offset_P) {
         return true;
     } else {
         return StFlow::componentActive(n);
@@ -94,73 +99,44 @@ void IonFlow::updateDiffFluxes(const double* x, size_t j0, size_t j1)
         frozenIonMethod(x,j0,j1);
     }
     if (m_stage == 2) {
-        electricFieldMethod(x,j0,j1);
+        poissonEqnMethod(x,j0,j1);
     }
 }
 
 void IonFlow::frozenIonMethod(const double* x, size_t j0, size_t j1)
 {
+    StFlow::updateDiffFluxes(x, j0, j1);
+//    for (size_t j = j0; j < j1; j++) {
+//        // flux for ions
+//        // Set flux to zero to prevent some fast charged species (e.g. electron)
+//        // to run away
+//        for (size_t k : m_kCharge) {
+//            m_flux(k,j) = 0;
+//        }
+//    }
+}
+
+void IonFlow::poissonEqnMethod(const double* x, size_t j0, size_t j1)
+{
+        // Add diffusion fluxes
+	StFlow::updateDiffFluxes(x, j0, j1);
+
+    // Add ambipolar diffusion
     for (size_t j = j0; j < j1; j++) {
-        double wtm = m_wtm[j];
-        double rho = density(j);
-        double dz = z(j+1) - z(j);
+        const double E_ambi = E(x,j);
+        const double rho = 0.5*(density(j) + density(j+1));
         double sum = 0.0;
-        for (size_t k : m_kNeutral) {
-            m_flux(k,j) = m_wt[k]*(rho*m_diff[k+m_nsp*j]/wtm);
-            m_flux(k,j) *= (X(x,k,j) - X(x,k,j+1))/dz;
-            sum -= m_flux(k,j);
+        for (size_t k : m_kCharge) {
+            const double Vdrift = m_speciesCharge[k] * m_mobility[k+m_nsp*j] * E_ambi;
+            // Upwind the mass fraction reconstruction based on the sign of drift velocity
+            const double Flux = rho * Vdrift * ((Vdrift > 0.0) ? Y(x,k,j) : Y(x,k,j+1));
+            m_flux(k,j) += Flux;
+            sum -= Flux;
         }
 
         // correction flux to insure that \sum_k Y_k V_k = 0.
-        for (size_t k : m_kNeutral) {
-            m_flux(k,j) += sum*Y(x,k,j);
-        }
-
-        // flux for ions
-        // Set flux to zero to prevent some fast charged species (such electrons)
-        // to run away
-        for (size_t k : m_kCharge) {
-            m_flux(k,j) = 0;
-        }
-    }
-}
-
-void IonFlow::electricFieldMethod(const double* x, size_t j0, size_t j1)
-{
-    for (size_t j = j0; j < j1; j++) {
-        double wtm = m_wtm[j];
-        double rho = density(j);
-        double dz = z(j+1) - z(j);
-
-        // mixture-average diffusion
-        double sum = 0.0;
         for (size_t k = 0; k < m_nsp; k++) {
-            m_flux(k,j) = m_wt[k]*(rho*m_diff[k+m_nsp*j]/wtm);
-            m_flux(k,j) *= (X(x,k,j) - X(x,k,j+1))/dz;
-            sum -= m_flux(k,j);
-        }
-
-        // ambipolar diffusion
-        double E_ambi = E(x,j);
-        for (size_t k : m_kCharge) {
-            double Yav = 0.5 * (Y(x,k,j) + Y(x,k,j+1));
-            double drift = rho * Yav * E_ambi
-                           * m_speciesCharge[k] * m_mobility[k+m_nsp*j];
-            m_flux(k,j) += drift;
-        }
-
-        // correction flux
-        double sum_flux = 0.0;
-        for (size_t k = 0; k < m_nsp; k++) {
-            sum_flux -= m_flux(k,j); // total net flux
-        }
-        double sum_ion = 0.0;
-        for (size_t k : m_kCharge) {
-            sum_ion += Y(x,k,j);
-        }
-        // The portion of correction for ions is taken off
-        for (size_t k : m_kNeutral) {
-            m_flux(k,j) += Y(x,k,j) / (1-sum_ion) * sum_flux;
+        m_flux(k,j) += sum*Y(x,k,j);
         }
     }
 }
@@ -173,7 +149,7 @@ void IonFlow::setSolvingStage(const size_t stage)
         throw CanteraError("IonFlow::setSolvingStage",
                     "solution stage must be set to: "
                     "1) frozenIonMethod, "
-                    "2) electricFieldEqnMethod");
+                    "2) poissonEqnMethod");
     }
 }
 
@@ -181,82 +157,93 @@ void IonFlow::evalResidual(double* x, double* rsd, int* diag,
                            double rdt, size_t jmin, size_t jmax)
 {
     StFlow::evalResidual(x, rsd, diag, rdt, jmin, jmax);
-    if (m_stage != 2) {
-        return;
-    }
-
     for (size_t j = jmin; j <= jmax; j++) {
         if (j == 0) {
-            // enforcing the flux for charged species is difficult
-            // since charged species are also affected by electric
-            // force, so Neumann boundary condition is used.
-            for (size_t k : m_kCharge) {
-                rsd[index(c_offset_Y + k, 0)] = Y(x,k,0) - Y(x,k,1);
-            }
-            rsd[index(c_offset_E, j)] = E(x,0);
-            diag[index(c_offset_E, j)] = 0;
+            // Boundary conditions will take care of this point later
+            rsd[index(c_offset_P, j)] = phi(x,j);
+            diag[index(c_offset_P, j)] = 0;
         } else if (j == m_points - 1) {
-            rsd[index(c_offset_E, j)] = dEdz(x,j) - rho_e(x,j) / epsilon_0;
-            diag[index(c_offset_E, j)] = 0;
+            // Boundary conditions will take care of this point later
+            rsd[index(c_offset_P, j)] = phi(x,j);
+            diag[index(c_offset_P, j)] = 0;
         } else {
             //-----------------------------------------------
-            //    Electric field by Gauss's law
+            //    Energy equation
+            //    Add Jule heating
+            //
+            //    Na*sum(q_k*J_k/W_k)*E
+            //-----------------------------------------------
+            if (m_do_energy[j]) {
+                double JuleHeating = 0.0;
+                for (size_t k : m_kCharge) {
+                    double flxk = 0.5*(m_flux(k,j-1) + m_flux(k,j));
+                    JuleHeating += m_speciesCharge[k] * flxk / m_wt[k];
+                }
+                JuleHeating *= ElectronCharge * Avogadro * 0.5*(E(x,j) + E(x,j-1));
+                rsd[index(c_offset_T, j)] += JuleHeating/(m_rho[j]*m_cp[j]);
+            }
+            //-----------------------------------------------
+            //    Poisson's equation
             //
             //    dE/dz = e/eps_0 * sum(q_k*n_k)
             //
-            //    E = -dV/dz
+            //    E = -dPhi/dz
             //-----------------------------------------------
-            rsd[index(c_offset_E, j)] = dEdz(x,j) - rho_e(x,j) / epsilon_0;
-            diag[index(c_offset_E, j)] = 0;
+            if (m_stage == 2) {
+               rsd[index(c_offset_P, j)] = dEdz(x,j) - rho_e(x,j)/epsilon_0;
+            } else {
+               rsd[index(c_offset_P, j)] = dEdz(x,j);
+            }
+            diag[index(c_offset_P, j)] = 0;
         }
     }
 }
 
-void IonFlow::solveElectricField(size_t j)
+void IonFlow::solvePoissonEqn(size_t j)
 {
     bool changed = false;
     if (j == npos) {
         for (size_t i = 0; i < m_points; i++) {
-            if (!m_do_electric_field[i]) {
+            if (!m_do_poisson[i]) {
                 changed = true;
             }
-            m_do_electric_field[i] = true;
+            m_do_poisson[i] = true;
         }
     } else {
-        if (!m_do_electric_field[j]) {
+        if (!m_do_poisson[j]) {
             changed = true;
         }
-        m_do_electric_field[j] = true;
+        m_do_poisson[j] = true;
     }
     m_refiner->setActive(c_offset_U, true);
     m_refiner->setActive(c_offset_V, true);
     m_refiner->setActive(c_offset_T, true);
-    m_refiner->setActive(c_offset_E, true);
+    m_refiner->setActive(c_offset_P, true);
     if (changed) {
         needJacUpdate();
     }
 }
 
-void IonFlow::fixElectricField(size_t j)
+void IonFlow::fixElectricPotential(size_t j)
 {
     bool changed = false;
     if (j == npos) {
         for (size_t i = 0; i < m_points; i++) {
-            if (m_do_electric_field[i]) {
+            if (m_do_poisson[i]) {
                 changed = true;
             }
-            m_do_electric_field[i] = false;
+            m_do_poisson[i] = false;
         }
     } else {
-        if (m_do_electric_field[j]) {
+        if (m_do_poisson[j]) {
             changed = true;
         }
-        m_do_electric_field[j] = false;
+        m_do_poisson[j] = false;
     }
     m_refiner->setActive(c_offset_U, false);
     m_refiner->setActive(c_offset_V, false);
     m_refiner->setActive(c_offset_T, false);
-    m_refiner->setActive(c_offset_E, false);
+    m_refiner->setActive(c_offset_P, false);
     if (changed) {
         needJacUpdate();
     }
@@ -283,10 +270,15 @@ void IonFlow::_finalize(const double* x)
 {
     StFlow::_finalize(x);
 
-    bool p = m_do_electric_field[0];
-    if (p) {
-        solveElectricField();
-    }
+        //bool p = m_do_poisson[0];
+    //for (size_t j = 0; j < m_points; j++) {
+    //    if (!p) {
+    //        m_fixedElecPoten[j] = phi(x, j);
+    //    }
+    //}
+    //if (p) {
+    //    solvePoissonEqn();
+    //}
 }
 
 }

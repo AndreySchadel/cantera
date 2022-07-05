@@ -5,7 +5,8 @@
 
 #include "cantera/oneD/StFlow.h"
 #include "cantera/oneD/refine.h"
-#include "cantera/transport/Transport.h"
+#include "cantera/base/ctml.h"
+#include "cantera/transport/TransportBase.h"
 #include "cantera/numerics/funcs.h"
 #include "cantera/base/global.h"
 
@@ -78,7 +79,7 @@ StFlow::StFlow(ThermoPhase* ph, size_t nsp, size_t points) :
     setBounds(1, -1e20, 1e20); // V
     setBounds(2, 200.0, 2*m_thermo->maxTemp()); // temperature bounds
     setBounds(3, -1e20, 1e20); // lambda should be negative
-    setBounds(c_offset_E, -1e20, 1e20); // no bounds for inactive component
+    setBounds(c_offset_P, -1e20, 1e20); // no bounds for inactive component
 
     // mass fraction bounds
     for (size_t k = 0; k < m_nsp; k++) {
@@ -402,15 +403,15 @@ void StFlow::evalResidual(double* x, double* rsd, int* diag,
             rsd[index(c_offset_Y + leftExcessSpecies(), 0)] = 1.0 - sum;
 
             // set residual of poisson's equ to zero
-            rsd[index(c_offset_E, 0)] = x[index(c_offset_E, j)];
+            rsd[index(c_offset_P, 0)] = x[index(c_offset_P, j)];
         } else if (j == m_points - 1) {
             evalRightBoundary(x, rsd, diag, rdt);
             // set residual of poisson's equ to zero
-            rsd[index(c_offset_E, j)] = x[index(c_offset_E, j)];
+            rsd[index(c_offset_P, j)] = x[index(c_offset_P, j)];
         } else { // interior points
             evalContinuity(j, x, rsd, diag, rdt);
             // set residual of poisson's equ to zero
-            rsd[index(c_offset_E, j)] = x[index(c_offset_E, j)];
+            rsd[index(c_offset_P, j)] = x[index(c_offset_P, j)];
 
             //------------------------------------------------
             //    Radial momentum equation
@@ -586,7 +587,7 @@ string StFlow::componentName(size_t n) const
     case 3:
         return "lambda";
     case 4:
-        return "eField";
+        return "ePotential";
     default:
         if (n >= c_offset_Y && n < (c_offset_Y + m_nsp)) {
             return m_thermo->speciesName(n - c_offset_Y);
@@ -606,7 +607,7 @@ size_t StFlow::componentIndex(const std::string& name) const
         return 2;
     } else if (name=="lambda") {
         return 3;
-    } else if (name == "eField") {
+    } else if (name == "ePotential") {
         return 4;
     } else {
         for (size_t n=c_offset_Y; n<m_nsp+c_offset_Y; n++) {
@@ -626,11 +627,249 @@ bool StFlow::componentActive(size_t n) const
         return m_type != cFreeFlow;
     case c_offset_L: // lambda
         return m_type != cFreeFlow;
-    case c_offset_E: // eField
+    case c_offset_P: // eField
         return false;
     default:
         return true;
     }
+}
+
+void StFlow::restore(const XML_Node& dom, doublereal* soln, int loglevel)
+{
+    Domain1D::restore(dom, soln, loglevel);
+    vector<string> ignored;
+    size_t nsp = m_thermo->nSpecies();
+    vector_int did_species(nsp, 0);
+
+    vector<XML_Node*> str = dom.getChildren("string");
+    for (size_t istr = 0; istr < str.size(); istr++) {
+        const XML_Node& nd = *str[istr];
+        writelog(nd["title"]+": "+nd.value()+"\n");
+    }
+
+    double pp = getFloat(dom, "pressure", "pressure");
+    setPressure(pp);
+    vector<XML_Node*> d = dom.child("grid_data").getChildren("floatArray");
+    vector_fp x;
+    size_t np = 0;
+    bool readgrid = false, wrote_header = false;
+    for (size_t n = 0; n < d.size(); n++) {
+        const XML_Node& fa = *d[n];
+        string nm = fa["title"];
+        if (nm == "z") {
+            getFloatArray(fa,x,false);
+            np = x.size();
+            if (loglevel >= 2) {
+                writelog("Grid contains {} points.\n", np);
+            }
+            readgrid = true;
+            setupGrid(np, x.data());
+        }
+    }
+    if (!readgrid) {
+        throw CanteraError("StFlow::restore",
+                           "domain contains no grid points.");
+    }
+
+    debuglog("Importing datasets:\n", loglevel >= 2);
+    for (size_t n = 0; n < d.size(); n++) {
+        const XML_Node& fa = *d[n];
+        string nm = fa["title"];
+        getFloatArray(fa,x,false);
+        if (nm == "u") {
+            debuglog("axial velocity   ", loglevel >= 2);
+            if (x.size() != np) {
+                throw CanteraError("StFlow::restore",
+                                   "axial velocity array size error");
+            }
+            for (size_t j = 0; j < np; j++) {
+                soln[index(c_offset_U,j)] = x[j];
+            }
+        } else if (nm == "z") {
+            ; // already read grid
+        } else if (nm == "V") {
+            debuglog("radial velocity   ", loglevel >= 2);
+            if (x.size() != np) {
+                throw CanteraError("StFlow::restore",
+                                   "radial velocity array size error");
+            }
+            for (size_t j = 0; j < np; j++) {
+                soln[index(c_offset_V,j)] = x[j];
+            }
+        } else if (nm == "T") {
+            debuglog("temperature   ", loglevel >= 2);
+            if (x.size() != np) {
+                throw CanteraError("StFlow::restore",
+                                   "temperature array size error");
+            }
+            for (size_t j = 0; j < np; j++) {
+                soln[index(c_offset_T,j)] = x[j];
+            }
+
+            // For fixed-temperature simulations, use the imported temperature
+            // profile by default.  If this is not desired, call
+            // setFixedTempProfile *after* restoring the solution.
+            vector_fp zz(np);
+            for (size_t jj = 0; jj < np; jj++) {
+                zz[jj] = (grid(jj) - zmin())/(zmax() - zmin());
+            }
+            setFixedTempProfile(zz, x);
+        } else if (nm == "L") {
+            debuglog("lambda   ", loglevel >= 2);
+            if (x.size() != np) {
+                throw CanteraError("StFlow::restore",
+                                   "lambda array size error");
+            }
+            for (size_t j = 0; j < np; j++) {
+                soln[index(c_offset_L,j)] = x[j];
+            }
+        } else if (nm == "DeltaPhi") {
+            debuglog("electric potential   ", loglevel >= 2);
+            if (x.size() != np) {
+                throw CanteraError("StFlow::restore",
+                                   "electric potential artay size error");
+            }
+            for (size_t j = 0; j < np; j++) {
+                soln[index(c_offset_P,j)] = x[j];
+            }
+        } else if (m_thermo->speciesIndex(nm) != npos) {
+            debuglog(nm+"   ", loglevel >= 2);
+            if (x.size() == np) {
+                size_t k = m_thermo->speciesIndex(nm);
+                did_species[k] = 1;
+                for (size_t j = 0; j < np; j++) {
+                    soln[index(k+c_offset_Y,j)] = x[j];
+                }
+            }
+        } else {
+            ignored.push_back(nm);
+        }
+    }
+
+    if (loglevel >=2 && !ignored.empty()) {
+        writelog("\n\n");
+        writelog("Ignoring datasets:\n");
+        size_t nn = ignored.size();
+        for (size_t n = 0; n < nn; n++) {
+            writelog(ignored[n]+"   ");
+        }
+    }
+
+    if (loglevel >= 1) {
+        for (size_t ks = 0; ks < nsp; ks++) {
+            if (did_species[ks] == 0) {
+                if (!wrote_header) {
+                    writelog("Missing data for species:\n");
+                    wrote_header = true;
+                }
+                writelog(m_thermo->speciesName(ks)+" ");
+            }
+        }
+    }
+
+    if (dom.hasChild("energy_enabled")) {
+        getFloatArray(dom, x, false, "", "energy_enabled");
+        if (x.size() == nPoints()) {
+            for (size_t i = 0; i < x.size(); i++) {
+                m_do_energy[i] = (x[i] != 0);
+            }
+        } else if (!x.empty()) {
+            throw CanteraError("StFlow::restore", "energy_enabled is length {}"
+                               "but should be length {}", x.size(), nPoints());
+        }
+    }
+
+    if (dom.hasChild("species_enabled")) {
+        getFloatArray(dom, x, false, "", "species_enabled");
+        if (x.size() == m_nsp) {
+            for (size_t i = 0; i < x.size(); i++) {
+                m_do_species[i] = (x[i] != 0);
+            }
+        } else if (!x.empty()) {
+            // This may occur when restoring from a mechanism with a different
+            // number of species.
+            if (loglevel > 0) {
+                warn_user("StFlow::restore", "species_enabled is "
+                    "length {} but should be length {}. Enabling all species "
+                    "equations by default.", x.size(), m_nsp);
+            }
+            m_do_species.assign(m_nsp, true);
+        }
+    }
+
+    if (dom.hasChild("refine_criteria")) {
+        XML_Node& ref = dom.child("refine_criteria");
+        refiner().setCriteria(getFloat(ref, "ratio"), getFloat(ref, "slope"),
+                              getFloat(ref, "curve"), getFloat(ref, "prune"));
+        refiner().setGridMin(getFloat(ref, "grid_min"));
+    }
+
+    if (domainType() == cFreeFlow) {
+        getOptionalFloat(dom, "t_fixed", m_tfixed);
+        getOptionalFloat(dom, "z_fixed", m_zfixed);
+    }
+}
+
+XML_Node& StFlow::save(XML_Node& o, const doublereal* const sol)
+{
+    Array2D soln(m_nv, m_points, sol + loc());
+    XML_Node& flow = Domain1D::save(o, sol);
+    flow.addAttribute("type",flowType());
+
+    XML_Node& gv = flow.addChild("grid_data");
+    addFloat(flow, "pressure", m_press, "Pa", "pressure");
+
+    addFloatArray(gv,"z",m_z.size(), m_z.data(),
+                  "m","length");
+    vector_fp x(soln.nColumns());
+
+    soln.getRow(c_offset_U, x.data());
+    addFloatArray(gv,"u",x.size(),x.data(),"m/s","velocity");
+
+    soln.getRow(c_offset_V, x.data());
+    addFloatArray(gv,"V",x.size(),x.data(),"1/s","rate");
+
+    soln.getRow(c_offset_T, x.data());
+    addFloatArray(gv,"T",x.size(),x.data(),"K","temperature");
+
+    soln.getRow(c_offset_L, x.data());
+    addFloatArray(gv,"L",x.size(),x.data(),"N/m^4");
+
+    soln.getRow(c_offset_P, x.data());
+    addFloatArray(gv,"DeltaPhi",x.size(),x.data(),"V","electric potential");
+
+    for (size_t k = 0; k < m_nsp; k++) {
+        soln.getRow(c_offset_Y+k, x.data());
+        addFloatArray(gv,m_thermo->speciesName(k),
+                      x.size(),x.data(),"","massFraction");
+    }
+    if (m_do_radiation) {
+        addFloatArray(gv, "radiative_heat_loss", m_z.size(),
+            m_qdotRadiation.data(), "W/m^3", "specificPower");
+    }
+    vector_fp values(nPoints());
+    for (size_t i = 0; i < nPoints(); i++) {
+        values[i] = m_do_energy[i];
+    }
+    addNamedFloatArray(flow, "energy_enabled", nPoints(), &values[0]);
+
+    values.resize(m_nsp);
+    for (size_t i = 0; i < m_nsp; i++) {
+        values[i] = m_do_species[i];
+    }
+    addNamedFloatArray(flow, "species_enabled", m_nsp, &values[0]);
+
+    XML_Node& ref = flow.addChild("refine_criteria");
+    addFloat(ref, "ratio", refiner().maxRatio());
+    addFloat(ref, "slope", refiner().maxDelta());
+    addFloat(ref, "curve", refiner().maxSlope());
+    addFloat(ref, "prune", refiner().prune());
+    addFloat(ref, "grid_min", refiner().gridMin());
+    if (m_zfixed != Undef) {
+        addFloat(flow, "z_fixed", m_zfixed, "m");
+        addFloat(flow, "t_fixed", m_tfixed, "K");
+    }
+    return flow;
 }
 
 AnyMap StFlow::serialize(const double* soln) const
