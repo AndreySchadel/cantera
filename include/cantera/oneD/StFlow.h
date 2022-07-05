@@ -23,7 +23,7 @@ const size_t c_offset_U = 0; // axial velocity
 const size_t c_offset_V = 1; // strain rate
 const size_t c_offset_T = 2; // temperature
 const size_t c_offset_L = 3; // (1/r)dP/dr
-const size_t c_offset_E = 4; // electric poisson's equation
+const size_t c_offset_P = 4; // electric poisson's equation
 const size_t c_offset_Y = 5; // mass fractions
 
 class Transport;
@@ -142,6 +142,21 @@ public:
 
     //! Print the solution.
     virtual void showSolution(const doublereal* x);
+
+    //! Save the current solution for this domain into an XML_Node
+    /*!
+     *  @param o    XML_Node to save the solution to.
+     *  @param sol  Current value of the solution vector. The object will pick
+     *              out which part of the solution vector pertains to this
+     *              object.
+     *
+     * @deprecated The XML output format is deprecated and will be removed in
+     *     Cantera 3.0.
+     */
+    virtual XML_Node& save(XML_Node& o, const doublereal* const sol);
+
+    virtual void restore(const XML_Node& dom, doublereal* soln,
+                         int loglevel);
 
     virtual AnyMap serialize(const double* soln) const;
     virtual void restore(const AnyMap& state, double* soln, int loglevel);

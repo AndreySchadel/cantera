@@ -41,12 +41,12 @@ public:
         _init(1);
     }
 
-    //! Set the temperature.
+    /// Set the temperature.
     virtual void setTemperature(double t) {
         m_temp = t;
     }
 
-    //! Temperature [K].
+    /// Temperature [K].
     virtual double temperature() {
         return m_temp;
     }
@@ -55,36 +55,71 @@ public:
         return 0;
     }
 
-    //! Set the mole fractions by specifying a std::string.
+    /// Set the mole fractions by specifying a std::string.
     virtual void setMoleFractions(const std::string& xin) {
         throw NotImplementedError("Boundary1D::setMoleFractions");
     }
 
-    //! Set the mole fractions by specifying an array.
+    /// Set the mole fractions by specifying an array.
     virtual void setMoleFractions(const double* xin) {
         throw NotImplementedError("Boundary1D::setMoleFractions");
     }
 
-    //! Mass fraction of species k.
+    /// Mass fraction of species k.
     virtual double massFraction(size_t k) {
         throw NotImplementedError("Boundary1D::massFraction");
     }
 
-    //! Set the total mass flow rate.
+    /// Set the total mass flow rate.
     virtual void setMdot(double mdot) {
         m_mdot = mdot;
     }
 
-    //! The total mass flow rate [kg/m2/s].
+    /// The total mass flow rate [kg/m2/s].
     virtual double mdot() {
         return m_mdot;
     }
+    /// Set the electric potential [V].
+    virtual void setElectricPotential(double phi) {
+        m_phi = phi;
+    }
+
+    /// The electric potential [V].
+    virtual double electricPotential() {
+        return m_phi;
+    }
+
+    /// Define this boundary as an anode and set the electric potential [V].
+    virtual void setIsAnode(bool isAnode) {
+        m_isAnode = isAnode;
+        m_isCathode = not isAnode;
+    }
+
+    /// Define this boundary as a cathode and set the electric potential [V].
+    virtual void setIsCathode(bool isCathode) {
+        m_isAnode = not isCathode;
+        m_isCathode = isCathode;
+    }
+
+    virtual bool isAnode() const {
+        return m_isAnode;
+    }
+
+    virtual bool isCathode() const {
+        return m_isCathode;
+    }
+
 
     virtual void setupGrid(size_t n, const double* z) {}
 
 protected:
     void _init(size_t n);
-
+    
+    void _setAnode(double* xb, double* rb,
+                   StFlow* m_flow, int sign);
+    void _setCathode(double* xb, double* rb,
+                     StFlow* m_flow, int sign);
+                     
     StFlow* m_flow_left, *m_flow_right;
     size_t m_ilr, m_left_nv, m_right_nv;
     size_t m_left_loc, m_right_loc;
@@ -94,6 +129,8 @@ protected:
     size_t m_start_left, m_start_right;
     ThermoPhase* m_phase_left, *m_phase_right;
     double m_temp, m_mdot;
+    double m_phi;
+    bool m_isAnode, m_isCathode;
 };
 
 
@@ -106,13 +143,13 @@ class Inlet1D : public Boundary1D
 public:
     Inlet1D();
 
-    //! set spreading rate
+    /// set spreading rate
     virtual void setSpreadRate(double V0) {
         m_V0 = V0;
         needJacUpdate();
     }
 
-    //! spreading rate
+    /// spreading rate
     virtual double spreadRate() {
         return m_V0;
     }
@@ -131,6 +168,8 @@ public:
     virtual void init();
     virtual void eval(size_t jg, double* xg, double* rg,
                       integer* diagg, double rdt);
+    virtual XML_Node& save(XML_Node& o, const double* const soln);
+    virtual void restore(const XML_Node& dom, double* soln, int loglevel);
     virtual AnyMap serialize(const double* soln) const;
     virtual void restore(const AnyMap& state, double* soln, int loglevel);
 
@@ -161,6 +200,8 @@ public:
     virtual void eval(size_t jg, double* xg, double* rg,
                       integer* diagg, double rdt);
 
+    virtual XML_Node& save(XML_Node& o, const double* const soln);
+    virtual void restore(const XML_Node& dom, double* soln, int loglevel);
     virtual AnyMap serialize(const double* soln) const;
 };
 
@@ -181,6 +222,8 @@ public:
     virtual void eval(size_t jg, double* xg, double* rg,
                       integer* diagg, double rdt);
 
+    virtual XML_Node& save(XML_Node& o, const double* const soln);
+    virtual void restore(const XML_Node& dom, double* soln, int loglevel);
     virtual AnyMap serialize(const double* soln) const;
 };
 
@@ -201,6 +244,8 @@ public:
     virtual void eval(size_t jg, double* xg, double* rg,
                       integer* diagg, double rdt);
 
+    virtual XML_Node& save(XML_Node& o, const double* const soln);
+    virtual void restore(const XML_Node& dom, double* soln, int loglevel);
     virtual AnyMap serialize(const double* soln) const;
 };
 
@@ -228,6 +273,8 @@ public:
     virtual void init();
     virtual void eval(size_t jg, double* xg, double* rg,
                       integer* diagg, double rdt);
+    virtual XML_Node& save(XML_Node& o, const double* const soln);
+    virtual void restore(const XML_Node& dom, double* soln, int loglevel);
     virtual AnyMap serialize(const double* soln) const;
     virtual void restore(const AnyMap& state, double* soln, int loglevel);
 
@@ -256,6 +303,8 @@ public:
     virtual void eval(size_t jg, double* xg, double* rg,
                       integer* diagg, double rdt);
 
+    virtual XML_Node& save(XML_Node& o, const double* const soln);
+    virtual void restore(const XML_Node& dom, double* soln, int loglevel);
     virtual AnyMap serialize(const double* soln) const;
     virtual void restore(const AnyMap& state, double* soln, int loglevel);
 
@@ -291,6 +340,8 @@ public:
     virtual void eval(size_t jg, double* xg, double* rg,
                       integer* diagg, double rdt);
 
+    virtual XML_Node& save(XML_Node& o, const double* const soln);
+    virtual void restore(const XML_Node& dom, double* soln, int loglevel);
     virtual AnyMap serialize(const double* soln) const;
     virtual void restore(const AnyMap& state, double* soln, int loglevel);
 

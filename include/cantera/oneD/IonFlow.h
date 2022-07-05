@@ -39,12 +39,12 @@ public:
     virtual bool componentActive(size_t n) const;
 
     virtual void _finalize(const double* x);
-    //! set to solve electric field on a point
-    void solveElectricField(size_t j=npos);
+    //! set to solve Poisson's equation on a point
+    void solvePoissonEqn(size_t j=npos);
     //! set to fix voltage on a point
-    void fixElectricField(size_t j=npos);
-    bool doElectricField(size_t j) {
-        return m_do_electric_field[j];
+    void fixElectricPotential(size_t j=npos);
+    bool doPoisson(size_t j) {
+        return m_do_poisson[j];
     }
 
     /**
@@ -65,7 +65,7 @@ public:
 protected:
     /*!
      * This function overloads the original function. The residual function
-     * of electric field is added.
+     * of Poisson's equation is added.
      */
     virtual void evalResidual(double* x, double* rsd, int* diag,
                               double rdt, size_t jmin, size_t jmax);
@@ -73,11 +73,10 @@ protected:
     virtual void updateDiffFluxes(const double* x, size_t j0, size_t j1);
     //! Solving phase one: the fluxes of charged species are turned off
     virtual void frozenIonMethod(const double* x, size_t j0, size_t j1);
-    //! Solving phase two: the electric field equation is added coupled
-    //! by the electrical drift
-    virtual void electricFieldMethod(const double* x, size_t j0, size_t j1);
-    //! flag for solving electric field or not
-    std::vector<bool> m_do_electric_field;
+    //! Solving phase three: the Poisson's equation is added coupled by the electrical drift
+    virtual void poissonEqnMethod(const double* x, size_t j0, size_t j1);
+    //! flag for solving poisson's equation or not
+    std::vector<bool> m_do_poisson;
 
     //! flag for importing transport of electron
     bool m_import_electron_transport;
@@ -104,13 +103,27 @@ protected:
     //! index of electron
     size_t m_kElectron;
 
+    //! fixed electric potential value
+    vector_fp m_fixedElecPoten;
+
+    //! The fixed electric potential value at point j
+    double phi_fixed(size_t j) const {
+        return m_fixedElecPoten[j];
+    }
+
+    //! electric potential
+    double phi(const double* x, size_t j) const {
+        return x[index(c_offset_P, j)];
+    }
+
+
     //! electric field
     double E(const double* x, size_t j) const {
-        return x[index(c_offset_E, j)];
+        return -(phi(x,j+1)-phi(x,j))/(z(j+1)-z(j));
     }
 
     double dEdz(const double* x, size_t j) const {
-        return (E(x,j)-E(x,j-1))/(z(j)-z(j-1));
+        return 2*(E(x,j)-E(x,j-1))/(z(j+1)-z(j-1));
     }
 
     //! number density
